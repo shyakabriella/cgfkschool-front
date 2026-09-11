@@ -2,64 +2,37 @@
 
 namespace App\Notifications;
 
-use Illuminate\Bus\Queueable;
+use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Notifications\Messages\MailMessage;
-use Illuminate\Notifications\Notification;
 
-class ResetPasswordNotification extends Notification
+class ResetPasswordNotification extends ResetPassword
 {
-    use Queueable;
-
-    public function __construct(
-        private readonly string $token
-    ) {
-    }
-
-    /**
-     * Determine how the notification will be delivered.
-     *
-     * @return array<int, string>
-     */
-    public function via(object $notifiable): array
-    {
-        return ['mail'];
-    }
-
-    /**
-     * Build the password-reset email.
-     */
-    public function toMail(object $notifiable): MailMessage
+    public function toMail($notifiable): MailMessage
     {
         $frontendUrl = rtrim(
-            env('FRONTEND_URL', 'http://localhost:3000'),
+            config('app.frontend_url'),
             '/'
         );
 
-        $resetUrl = $frontendUrl . '/reset-password?' . http_build_query([
-            'token' => $this->token,
-            'email' => $notifiable->getEmailForPasswordReset(),
-        ]);
+        $resetUrl = $frontendUrl
+            . '/reset-password?token='
+            . urlencode($this->token)
+            . '&email='
+            . urlencode($notifiable->getEmailForPasswordReset());
 
         return (new MailMessage)
-            ->subject('Reset Your CGFK Account Password')
-            ->view('emails.reset-password', [
-                'user' => $notifiable,
-                'resetUrl' => $resetUrl,
-                'frontendUrl' => $frontendUrl,
-                'expirationMinutes' => config(
-                    'auth.passwords.users.expire',
-                    60
-                ),
-            ]);
-    }
-
-    /**
-     * Convert the notification to an array.
-     *
-     * @return array<string, mixed>
-     */
-    public function toArray(object $notifiable): array
-    {
-        return [];
+            ->subject('Reset Your CGFK School Password')
+            ->greeting('Hello ' . $notifiable->name . ',')
+            ->line(
+                'You are receiving this email because a password reset was requested for your CGFK School account.'
+            )
+            ->action('Reset Password', $resetUrl)
+            ->line(
+                'This password reset link will expire after the configured expiration period.'
+            )
+            ->line(
+                'If you did not request a password reset, no action is required.'
+            )
+            ->salutation('CGFK School Management');
     }
 }
