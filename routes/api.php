@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\API\FinanceLookupController;
+
 use App\Http\Controllers\API\FeePaymentController;
 
 use App\Http\Controllers\API\FeeItemController;
@@ -135,5 +137,16 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         'fee-payments',
         FeePaymentController::class
     )->only(['index', 'store', 'update', 'destroy']);
+
+
+    Route::get('/finance/classes', [
+        FinanceLookupController::class,
+        'classes',
+    ]);
+
+    Route::get('/finance/classes/{schoolClass}/students', [
+        FinanceLookupController::class,
+        'students',
+    ]);
 
 });
