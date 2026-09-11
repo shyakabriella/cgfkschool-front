@@ -1,5 +1,9 @@
 <?php
 
+use App\Http\Controllers\API\FeePaymentController;
+
+use App\Http\Controllers\API\FeeItemController;
+
 use App\Http\Controllers\API\TeacherLookupController;
 
 use App\Http\Controllers\API\PasswordResetController;
@@ -119,5 +123,17 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         TeacherLookupController::class,
         'index',
     ]);
+
+
+    Route::apiResource(
+        'fee-items',
+        FeeItemController::class
+    )->only(['index', 'store', 'update', 'destroy']);
+
+
+    Route::apiResource(
+        'fee-payments',
+        FeePaymentController::class
+    )->only(['index', 'store', 'update', 'destroy']);
 
 });

@@ -72,4 +72,10 @@ class Student extends Model
             ->values()
             ->all();
     }
+
+    public function feePayments(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(FeePayment::class);
+    }
+
 }
