@@ -115,6 +115,12 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         SchoolClassController::class
     );
 
+
+    Route::get(
+        '/attendance/classes/{schoolClass}/students',
+        [AttendanceController::class, 'classStudents']
+    );
+
     Route::apiResource(
         'attendances',
         AttendanceController::class
