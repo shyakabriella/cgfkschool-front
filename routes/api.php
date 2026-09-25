@@ -25,6 +25,7 @@ use App\Http\Controllers\API\RoleController;
 use App\Http\Controllers\API\SchoolClassController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\StudentController;
+use App\Http\Controllers\API\StudentAssessmentController;
 use App\Http\Controllers\API\StudentAccountController;
 use App\Http\Controllers\API\RwandaLocationController;
 use App\Http\Controllers\API\CourseController;
@@ -135,6 +136,31 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         [
             AssessmentAssignmentController::class,
             'myWork',
+        ]
+    );
+
+
+    Route::post(
+        '/student/assessment-assignments/{assignment}/start',
+        [
+            StudentAssessmentController::class,
+            'start',
+        ]
+    );
+
+    Route::post(
+        '/student/assessment-assignments/{assignment}/answer',
+        [
+            StudentAssessmentController::class,
+            'answer',
+        ]
+    );
+
+    Route::get(
+        '/student/assessment-assignments/{assignment}/result',
+        [
+            StudentAssessmentController::class,
+            'result',
         ]
     );
 
