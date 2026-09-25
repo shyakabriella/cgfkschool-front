@@ -228,8 +228,22 @@ class RegisterController extends BaseController
         $login = trim($request->login);
 
         $user = User::query()
-            ->where('email', strtolower($login))
-            ->orWhere('phone', $login)
+            ->where(function ($query) use ($login) {
+                $query
+                    ->where(
+                        'email',
+                        strtolower($login)
+                    )
+                    ->orWhere('phone', $login)
+                    ->orWhereHas(
+                        'student',
+                        fn ($studentQuery) =>
+                            $studentQuery->where(
+                                'student_id',
+                                strtoupper($login)
+                            )
+                    );
+            })
             ->first();
 
         if (! $user || ! Hash::check($request->password, $user->password)) {
@@ -255,17 +269,33 @@ class RegisterController extends BaseController
         $tokenName = $request->device_name ?: 'school-web';
         $token = $user->createToken($tokenName)->plainTextToken;
 
+        $authenticatedUser = $user->fresh();
+
+        if ($authenticatedUser->role === 'student') {
+            $authenticatedUser->load([
+                'student.schoolClass:id,name,code,level',
+            ]);
+        }
+
         return $this->sendResponse([
             'token' => $token,
             'token_type' => 'Bearer',
-            'user' => $user->fresh(),
+            'user' => $authenticatedUser,
         ], 'Login successful.');
     }
 
     public function me(Request $request): JsonResponse
     {
+        $user = $request->user();
+
+        if ($user->role === 'student') {
+            $user->load([
+                'student.schoolClass:id,name,code,level',
+            ]);
+        }
+
         return $this->sendResponse([
-            'user' => $request->user(),
+            'user' => $user,
         ], 'Current user retrieved successfully.');
     }
 

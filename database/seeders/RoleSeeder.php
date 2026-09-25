@@ -39,6 +39,11 @@ class RoleSeeder extends Seeder
                 'description' => 'Manages assigned classes, attendance, and student marks.',
             ],
             [
+                'name' => 'Student',
+                'slug' => 'student',
+                'description' => 'Accesses personal academic information, assessments, results, and reports.',
+            ],
+            [
                 'name' => 'Matron',
                 'slug' => 'matron',
                 'description' => 'Manages the welfare and supervision of assigned female students.',

@@ -12,7 +12,10 @@ class Student extends Model
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
+        'user_id',
         'student_id',
+        'email',
+        'gender',
         'first_name',
         'last_name',
         'father_name',
@@ -76,6 +79,12 @@ class Student extends Model
     public function feePayments(): \Illuminate\Database\Eloquent\Relations\HasMany
     {
         return $this->hasMany(FeePayment::class);
+    }
+
+
+    public function user(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(User::class);
     }
 
 }

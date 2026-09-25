@@ -1,0 +1,773 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\Course;
+use App\Models\CourseIndicativeContent;
+use App\Models\CourseLearningUnit;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use RuntimeException;
+
+class GeminiTeachingMaterialService
+{
+    public function analyzeSyllabus(
+        Course $course
+    ): array {
+        if (! $course->curriculum_path) {
+            throw new RuntimeException(
+                'Upload the course syllabus first.'
+            );
+        }
+
+        $syllabus = $this->cachedPdf(
+            $course,
+            'curriculum'
+        );
+
+        $prompt = <<<PROMPT
+Read the attached official course syllabus.
+
+Extract only the learning units and indicative contents that are explicitly written in the document.
+
+Strict rules:
+- Do not create new learning units.
+- Do not create new indicative contents.
+- Do not improve, expand or rewrite academic content.
+- Preserve the original wording as closely as possible.
+- Preserve the order used in the syllabus.
+- Extract learning outcomes only when they are explicitly present.
+- If a page number is visible, include it.
+- If information is missing, return an empty value.
+PROMPT;
+
+        return $this->generateJson(
+            [
+                ['text' => $prompt],
+                [
+                    'file_data' => [
+                        'mime_type' => 'application/pdf',
+                        'file_uri' => $syllabus['uri'],
+                    ],
+                ],
+            ],
+            $this->syllabusSchema()
+        );
+    }
+
+    public function generateTeachingMaterial(
+        Course $course,
+        CourseLearningUnit $learningUnit,
+        CourseIndicativeContent $indicativeContent,
+        array $settings
+    ): array {
+        $parts = [
+            [
+                'text' => $this->teachingPrompt(
+                    $course,
+                    $learningUnit,
+                    $indicativeContent,
+                    $settings
+                ),
+            ],
+        ];
+
+        /*
+         * Teaching material must come from course notes.
+         * The curriculum is only used to extract learning units
+         * and indicative contents.
+         */
+        if (! $course->notes_path) {
+            throw new RuntimeException(
+                'Upload the course notes as a PDF before generating teaching material.'
+            );
+        }
+
+        $notes = $this->cachedPdf(
+            $course,
+            'notes'
+        );
+
+        $parts[] = [
+            'file_data' => [
+                'mime_type' => 'application/pdf',
+                'file_uri' => $notes['uri'],
+            ],
+        ];
+
+        $sources = ['notes'];
+
+        $result = $this->generateJson(
+            $parts,
+            $this->teachingMaterialSchema()
+        );
+
+        if (
+            ($result['status'] ?? null) === 'generated'
+        ) {
+            $lessonText = collect(
+                $result['lesson_sections'] ?? []
+            )
+                ->map(function (array $section) {
+                    $paragraphs = implode(
+                        ' ',
+                        $section['paragraphs'] ?? []
+                    );
+
+                    $keyPoints = collect(
+                        $section['key_points'] ?? []
+                    )
+                        ->map(
+                            fn (array $point) =>
+                                ($point['title'] ?? '').' '.
+                                ($point['explanation'] ?? '')
+                        )
+                        ->implode(' ');
+
+                    $examples = collect(
+                        $section['examples'] ?? []
+                    )
+                        ->map(
+                            fn (array $example) =>
+                                ($example['title'] ?? '').' '.
+                                ($example['explanation'] ?? '')
+                        )
+                        ->implode(' ');
+
+                    return implode(' ', [
+                        $section['introduction'] ?? '',
+                        $paragraphs,
+                        $keyPoints,
+                        $examples,
+                        implode(
+                            ' ',
+                            $section['highlights'] ?? []
+                        ),
+                    ]);
+                })
+                ->implode(' ');
+
+            if (mb_strlen($lessonText) < 1500) {
+                throw new RuntimeException(
+                    'Gemini returned incomplete teaching material. Please generate it again.'
+                );
+            }
+        }
+
+        return [
+            'content' => $result,
+            'sources' => $sources,
+            'model' => config('gemini.model'),
+        ];
+    }
+
+    private function cachedPdf(
+        Course $course,
+        string $document
+    ): array {
+        $isNotes = $document === 'notes';
+
+        $storagePath = $isNotes
+            ? $course->notes_path
+            : $course->curriculum_path;
+
+        $cacheColumn = $isNotes
+            ? 'gemini_notes_file'
+            : 'gemini_curriculum_file';
+
+        $displayName = $isNotes
+            ? "{$course->code} course notes"
+            : "{$course->code} syllabus";
+
+        if (! $storagePath) {
+            throw new RuntimeException(
+                "{$displayName} has not been uploaded."
+            );
+        }
+
+        $disk = Storage::disk('public');
+
+        if (! $disk->exists($storagePath)) {
+            throw new RuntimeException(
+                "{$displayName} could not be found."
+            );
+        }
+
+        $absolutePath = $disk->path($storagePath);
+        $fileHash = hash_file(
+            'sha256',
+            $absolutePath
+        );
+
+        if (! $fileHash) {
+            throw new RuntimeException(
+                "{$displayName} could not be read."
+            );
+        }
+
+        $cachedFile = $course->{$cacheColumn};
+
+        if (
+            is_array($cachedFile) &&
+            ($cachedFile['hash'] ?? null) === $fileHash &&
+            ! empty($cachedFile['uri']) &&
+            ! empty($cachedFile['expires_at']) &&
+            now()->lt($cachedFile['expires_at'])
+        ) {
+            return $cachedFile;
+        }
+
+        $uploadedFile = $this->uploadPdf(
+            $storagePath,
+            $displayName
+        );
+
+        $cache = [
+            'name' => $uploadedFile['name'] ?? null,
+            'uri' => $uploadedFile['uri'],
+            'hash' => $fileHash,
+            'expires_at' => now()
+                ->addHours(40)
+                ->toISOString(),
+        ];
+
+        $course->update([
+            $cacheColumn => $cache,
+        ]);
+
+        $course->setAttribute(
+            $cacheColumn,
+            $cache
+        );
+
+        return $cache;
+    }
+
+    private function generateJson(
+        array $parts,
+        array $schema
+    ): array {
+        $apiKey = (string) config('gemini.api_key');
+
+        if ($apiKey === '') {
+            throw new RuntimeException(
+                'The Gemini API key is not configured.'
+            );
+        }
+
+        $url = sprintf(
+            '%s/v1beta/models/%s:generateContent',
+            rtrim((string) config('gemini.base_url'), '/'),
+            config('gemini.model')
+        );
+
+        $response = Http::timeout(
+            (int) config('gemini.timeout', 180)
+        )
+            ->retry(2, 1000)
+            ->withQueryParameters([
+                'key' => $apiKey,
+            ])
+            ->post($url, [
+                'contents' => [
+                    [
+                        'role' => 'user',
+                        'parts' => $parts,
+                    ],
+                ],
+                'generationConfig' => [
+                    'temperature' => 0.1,
+                    'maxOutputTokens' => 10000,
+                    'responseMimeType' =>
+                        'application/json',
+                    'responseJsonSchema' => $schema,
+                ],
+            ]);
+
+        if ($response->failed()) {
+            throw new RuntimeException(
+                $response->json('error.message')
+                ?: 'Gemini could not process the documents.'
+            );
+        }
+
+        $json = $response->json(
+            'candidates.0.content.parts.0.text'
+        );
+
+        if (! is_string($json) || trim($json) === '') {
+            throw new RuntimeException(
+                'Gemini returned an empty response.'
+            );
+        }
+
+        $decoded = json_decode(
+            $json,
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+
+        if (! is_array($decoded)) {
+            throw new RuntimeException(
+                'Gemini returned invalid information.'
+            );
+        }
+
+        return $decoded;
+    }
+
+    private function uploadPdf(
+        string $storagePath,
+        string $displayName
+    ): array {
+        $disk = Storage::disk('public');
+
+        if (! $disk->exists($storagePath)) {
+            throw new RuntimeException(
+                "{$displayName} could not be found."
+            );
+        }
+
+        $extension = strtolower(
+            pathinfo($storagePath, PATHINFO_EXTENSION)
+        );
+
+        if ($extension !== 'pdf') {
+            throw new RuntimeException(
+                "{$displayName} must be a PDF file."
+            );
+        }
+
+        $absolutePath = $disk->path($storagePath);
+        $fileSize = filesize($absolutePath);
+
+        if ($fileSize === false) {
+            throw new RuntimeException(
+                "{$displayName} could not be read."
+            );
+        }
+
+        $baseUrl = rtrim(
+            (string) config('gemini.base_url'),
+            '/'
+        );
+
+        $start = Http::timeout(60)
+            ->withHeaders([
+                'X-Goog-Upload-Protocol' => 'resumable',
+                'X-Goog-Upload-Command' => 'start',
+                'X-Goog-Upload-Header-Content-Length' =>
+                    (string) $fileSize,
+                'X-Goog-Upload-Header-Content-Type' =>
+                    'application/pdf',
+            ])
+            ->withQueryParameters([
+                'key' => config('gemini.api_key'),
+            ])
+            ->post(
+                "{$baseUrl}/upload/v1beta/files",
+                [
+                    'file' => [
+                        'display_name' => $displayName,
+                    ],
+                ]
+            );
+
+        if ($start->failed()) {
+            throw new RuntimeException(
+                $start->json('error.message')
+                ?: "Could not start {$displayName} upload."
+            );
+        }
+
+        $uploadUrl = $start->header(
+            'X-Goog-Upload-URL'
+        );
+
+        if (! $uploadUrl) {
+            throw new RuntimeException(
+                'Gemini did not return an upload URL.'
+            );
+        }
+
+        $contents = file_get_contents($absolutePath);
+
+        if ($contents === false) {
+            throw new RuntimeException(
+                "{$displayName} could not be opened."
+            );
+        }
+
+        $upload = Http::timeout(
+            (int) config('gemini.timeout', 180)
+        )
+            ->withHeaders([
+                'Content-Length' => (string) $fileSize,
+                'X-Goog-Upload-Offset' => '0',
+                'X-Goog-Upload-Command' =>
+                    'upload, finalize',
+            ])
+            ->withBody(
+                $contents,
+                'application/pdf'
+            )
+            ->post($uploadUrl);
+
+        if ($upload->failed()) {
+            throw new RuntimeException(
+                $upload->json('error.message')
+                ?: "{$displayName} failed to upload."
+            );
+        }
+
+        $file = $upload->json('file');
+
+        if (! is_array($file) || empty($file['uri'])) {
+            throw new RuntimeException(
+                'Gemini returned invalid file information.'
+            );
+        }
+
+        return $this->waitUntilActive($file);
+    }
+
+    private function waitUntilActive(array $file): array
+    {
+        if (($file['state'] ?? 'ACTIVE') === 'ACTIVE') {
+            return $file;
+        }
+
+        $name = $file['name'] ?? null;
+
+        if (! $name) {
+            return $file;
+        }
+
+        for ($attempt = 0; $attempt < 15; $attempt++) {
+            usleep(500000);
+
+            $response = Http::timeout(30)
+                ->withQueryParameters([
+                    'key' => config('gemini.api_key'),
+                ])
+                ->get(
+                    rtrim(
+                        (string) config('gemini.base_url'),
+                        '/'
+                    )."/v1beta/{$name}"
+                );
+
+            if ($response->failed()) {
+                continue;
+            }
+
+            $file = $response->json();
+            $state = $file['state'] ?? null;
+
+            if ($state === 'ACTIVE') {
+                return $file;
+            }
+
+            if ($state === 'FAILED') {
+                throw new RuntimeException(
+                    'Gemini failed to process the PDF.'
+                );
+            }
+        }
+
+        throw new RuntimeException(
+            'Gemini is still processing the PDF. Try again.'
+        );
+    }
+
+    private function teachingPrompt(
+        Course $course,
+        CourseLearningUnit $unit,
+        CourseIndicativeContent $content,
+        array $settings
+    ): string {
+        return <<<PROMPT
+Create complete teaching notes using only the attached course-notes PDF.
+
+COURSE INFORMATION
+Course: {$course->name}
+Course code: {$course->code}
+Selected learning unit: {$unit->title}
+Selected indicative content: {$content->title}
+Lesson date: {$settings['lesson_date']}
+Lesson duration: {$settings['duration_minutes']} minutes
+
+DOCUMENT INSTRUCTIONS
+The attached document is the complete course notes or trainee manual.
+
+Find the full section whose heading matches the selected indicative content:
+
+"{$content->title}"
+
+The document may first show this title in:
+- the table of contents;
+- a task or activity list;
+- a short outline.
+
+Do not use only those short lists.
+
+Continue reading until you find the detailed section normally identified by headings such as:
+- Key readings;
+- Description;
+- Explanation;
+- Theory;
+- Practical activity;
+- Examples.
+
+Read the complete selected indicative-content section from its beginning until the next indicative-content heading begins.
+
+CONTENT COVERAGE RULES
+- Produce detailed material that a teacher can actually use during the lesson.
+- Do not return only an overview or summary.
+- Include every major heading and subheading found in the selected section.
+- Include all definitions found in the notes.
+- Include all numbered and bulleted explanations.
+- Include comparisons and differences explained in the notes.
+- Include examples and analogies already present in the notes.
+- Include important terminology and its definitions.
+- Include principles, roles and responsibilities when they appear in the selected section.
+- Preserve the logical order used in the notes.
+- Explain each point using information from the course notes.
+- Do not replace a detailed list with a short sentence.
+- Do not write phrases such as "this lesson covers" without providing the complete content.
+- Do not omit content merely to make the answer shorter.
+
+OUTPUT ORGANIZATION RULES
+- Return a professionally organized teaching material.
+- Never place an entire numbered list inside one paragraph.
+- Use "introduction" for a short opening explanation.
+- Use "paragraphs" for detailed normal explanations.
+- Use "key_points" when the notes contain numbered items, definitions, reasons, principles, roles or responsibilities.
+- Every numbered item must become a separate key_points item.
+- Each key point must have a short title and its complete explanation.
+- Use "examples" for examples and analogies found in the notes.
+- Use "highlights" for definitions, important differences, rules and conclusions that the teacher should emphasize.
+- Return empty arrays when a section has no examples, highlights or key points.
+- Do not combine seven different points into one sentence.
+- Do not use Markdown numbering inside paragraph strings.
+- Preserve the original order of ideas in the course notes.
+
+SOURCE-GROUNDING RULES
+- Use only information contained in the attached course notes.
+- Do not introduce outside knowledge.
+- Do not invent facts, definitions, examples or references.
+- Every lesson section must have at least one source reference.
+- Every source-reference document must be exactly "Course notes".
+- Include the printed page number when visible.
+- Include a short supporting excerpt from the notes.
+- Never use "Curriculum" or "Syllabus" as the source.
+
+INSUFFICIENT MATERIAL
+Only return status "insufficient_material" when the detailed selected section genuinely cannot be found in the course notes.
+
+Before returning the result, verify:
+1. The response contains detailed teachable explanations.
+2. It covers all major subtopics inside the selected indicative content.
+3. It uses the detailed key readings rather than only the table of contents or task list.
+4. Every academic statement is supported by the course notes.
+PROMPT;
+    }
+
+    private function syllabusSchema(): array
+    {
+        return [
+            'type' => 'object',
+            'properties' => [
+                'learning_units' => [
+                    'type' => 'array',
+                    'items' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'code' => ['type' => 'string'],
+                            'title' => ['type' => 'string'],
+                            'description' => ['type' => 'string'],
+                            'source_page' => ['type' => 'string'],
+                            'learning_outcomes' => [
+                                'type' => 'array',
+                                'items' => ['type' => 'string'],
+                            ],
+                            'indicative_contents' => [
+                                'type' => 'array',
+                                'items' => [
+                                    'type' => 'object',
+                                    'properties' => [
+                                        'title' => [
+                                            'type' => 'string',
+                                        ],
+                                        'details' => [
+                                            'type' => 'string',
+                                        ],
+                                        'source_page' => [
+                                            'type' => 'string',
+                                        ],
+                                    ],
+                                    'required' => [
+                                        'title',
+                                        'details',
+                                        'source_page',
+                                    ],
+                                ],
+                            ],
+                        ],
+                        'required' => [
+                            'code',
+                            'title',
+                            'description',
+                            'source_page',
+                            'learning_outcomes',
+                            'indicative_contents',
+                        ],
+                    ],
+                ],
+            ],
+            'required' => ['learning_units'],
+        ];
+    }
+
+    private function teachingMaterialSchema(): array
+    {
+        return [
+            'type' => 'object',
+            'properties' => [
+                'status' => [
+                    'type' => 'string',
+                    'enum' => [
+                        'generated',
+                        'insufficient_material',
+                    ],
+                ],
+                'message' => [
+                    'type' => 'string',
+                ],
+                'title' => [
+                    'type' => 'string',
+                ],
+                'lesson_summary' => [
+                    'type' => 'string',
+                ],
+                'lesson_sections' => [
+                    'type' => 'array',
+                    'items' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'heading' => [
+                                'type' => 'string',
+                                'description' =>
+                                    'The main heading or subheading from the selected course-notes section.',
+                            ],
+                            'introduction' => [
+                                'type' => 'string',
+                                'description' =>
+                                    'A short introduction to this section using only information from the course notes.',
+                            ],
+                            'paragraphs' => [
+                                'type' => 'array',
+                                'items' => [
+                                    'type' => 'string',
+                                ],
+                                'description' =>
+                                    'Detailed explanatory paragraphs. Do not place numbered lists inside a paragraph.',
+                            ],
+                            'key_points' => [
+                                'type' => 'array',
+                                'items' => [
+                                    'type' => 'object',
+                                    'properties' => [
+                                        'title' => [
+                                            'type' => 'string',
+                                        ],
+                                        'explanation' => [
+                                            'type' => 'string',
+                                        ],
+                                    ],
+                                    'required' => [
+                                        'title',
+                                        'explanation',
+                                    ],
+                                ],
+                                'description' =>
+                                    'Numbered concepts, reasons, principles, roles or definitions that must be displayed separately.',
+                            ],
+                            'examples' => [
+                                'type' => 'array',
+                                'items' => [
+                                    'type' => 'object',
+                                    'properties' => [
+                                        'title' => [
+                                            'type' => 'string',
+                                        ],
+                                        'explanation' => [
+                                            'type' => 'string',
+                                        ],
+                                    ],
+                                    'required' => [
+                                        'title',
+                                        'explanation',
+                                    ],
+                                ],
+                                'description' =>
+                                    'Examples and analogies explicitly found in the course notes.',
+                            ],
+                            'highlights' => [
+                                'type' => 'array',
+                                'items' => [
+                                    'type' => 'string',
+                                ],
+                                'description' =>
+                                    'Important definitions, differences, rules or conclusions that a teacher should emphasize.',
+                            ],
+                            'source_references' => [
+                                'type' => 'array',
+                                'items' => [
+                                    'type' => 'object',
+                                    'properties' => [
+                                        'document' => [
+                                            'type' => 'string',
+                                            'enum' => [
+                                                'Course notes',
+                                            ],
+                                        ],
+                                        'page_reference' => [
+                                            'type' => 'string',
+                                        ],
+                                        'excerpt' => [
+                                            'type' => 'string',
+                                        ],
+                                    ],
+                                    'required' => [
+                                        'document',
+                                        'page_reference',
+                                        'excerpt',
+                                    ],
+                                ],
+                            ],
+                        ],
+                        'required' => [
+                            'heading',
+                            'introduction',
+                            'paragraphs',
+                            'key_points',
+                            'examples',
+                            'highlights',
+                            'source_references',
+                        ],
+                    ],
+                ],
+            ],
+            'required' => [
+                'status',
+                'message',
+                'title',
+                'lesson_summary',
+                'lesson_sections',
+            ],
+        ];
+    }
+}
+

@@ -1,5 +1,10 @@
 <?php
 
+use App\Http\Controllers\API\TeachingMaterialController;
+
+use App\Http\Controllers\API\AssessmentController;
+use App\Http\Controllers\API\AssessmentAssignmentController;
+
 use App\Http\Controllers\API\FinanceLookupController;
 
 use App\Http\Controllers\API\FeePaymentController;
@@ -20,6 +25,7 @@ use App\Http\Controllers\API\RoleController;
 use App\Http\Controllers\API\SchoolClassController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\StudentController;
+use App\Http\Controllers\API\StudentAccountController;
 use App\Http\Controllers\API\RwandaLocationController;
 use App\Http\Controllers\API\CourseController;
 use App\Http\Controllers\API\TeacherAssignmentController;
@@ -41,6 +47,19 @@ Route::middleware('throttle:5,1')->group(function () {
 
 });
 
+
+Route::middleware('throttle:10,1')->group(function () {
+    Route::post(
+        '/student-account/check',
+        [StudentAccountController::class, 'checkStudentId']
+    );
+
+    Route::post(
+        '/student-account/register',
+        [StudentAccountController::class, 'register']
+    );
+});
+
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::apiResource(
         'teacher-assignments',
@@ -56,6 +75,11 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         'school-classes/{schoolClass}/representative',
         [ClassRepresentativeController::class, 'update']
     );
+    Route::post(
+        '/courses/{course}/materials',
+        [CourseController::class, 'uploadMaterials']
+    );
+
     Route::apiResource(
         'courses',
         CourseController::class
@@ -89,6 +113,31 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         'update',
         'destroy',
     ]);
+
+    Route::get(
+        '/assessments/{assessment}/students',
+        [
+            AssessmentAssignmentController::class,
+            'students',
+        ]
+    );
+
+    Route::post(
+        '/assessments/{assessment}/assign',
+        [
+            AssessmentAssignmentController::class,
+            'assign',
+        ]
+    );
+
+    Route::get(
+        '/student/my-work',
+        [
+            AssessmentAssignmentController::class,
+            'myWork',
+        ]
+    );
+
     Route::get('/me', [RegisterController::class, 'me']);
     Route::post('/logout', [RegisterController::class, 'logout']);
 
@@ -155,4 +204,64 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         'students',
     ]);
 
+
+    Route::get('/assessments', [
+        AssessmentController::class,
+        'index',
+    ]);
+
+    Route::post('/courses/{course}/generate-assessment', [
+        AssessmentController::class,
+        'generate',
+    ])->middleware('throttle:5,1');
+
+    Route::get('/assessments/{assessment}', [
+        AssessmentController::class,
+        'show',
+    ]);
+
+    Route::delete('/assessments/{assessment}', [
+        AssessmentController::class,
+        'destroy',
+    ]);
+
+    Route::post(
+        '/courses/{course}/analyze-syllabus',
+        [
+            TeachingMaterialController::class,
+            'analyzeSyllabus',
+        ]
+    )->middleware('throttle:3,1');
+
+    Route::get(
+        '/courses/{course}/learning-units',
+        [
+            TeachingMaterialController::class,
+            'learningUnits',
+        ]
+    );
+
+    Route::post(
+        '/courses/{course}/generate-teaching-material',
+        [
+            TeachingMaterialController::class,
+            'generate',
+        ]
+    )->middleware('throttle:5,1');
+
+    Route::get(
+        '/teaching-materials',
+        [
+            TeachingMaterialController::class,
+            'index',
+        ]
+    );
+
+    Route::get(
+        '/teaching-materials/{teachingMaterial}',
+        [
+            TeachingMaterialController::class,
+            'show',
+        ]
+    );
 });

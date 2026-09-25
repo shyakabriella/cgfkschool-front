@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Storage;
 
 class Course extends Model
 {
@@ -18,15 +19,66 @@ class Course extends Model
         'hours',
         'periods',
         'description',
+        'curriculum_path',
+        'notes_path',
+        'gemini_curriculum_file',
+        'gemini_notes_file',
         'status',
     ];
+
+    protected $appends = [
+        'curriculum_url',
+        'notes_url',
+    ];
+
+    public function getCurriculumUrlAttribute(): ?string
+    {
+        if (! $this->curriculum_path) {
+            return null;
+        }
+
+        return url(Storage::url($this->curriculum_path));
+    }
+
+    public function getNotesUrlAttribute(): ?string
+    {
+        if (! $this->notes_path) {
+            return null;
+        }
+
+        return url(Storage::url($this->notes_path));
+    }
 
     protected function casts(): array
     {
         return [
             'hours' => 'integer',
             'periods' => 'integer',
+            'gemini_curriculum_file' => 'array',
+            'gemini_notes_file' => 'array',
         ];
+    }
+
+    public function assessments(): HasMany
+    {
+        return $this->hasMany(
+            Assessment::class,
+            'course_id'
+        );
+    }
+
+    public function learningUnits(): HasMany
+    {
+        return $this->hasMany(
+            CourseLearningUnit::class
+        )->orderBy('position');
+    }
+
+    public function teachingMaterials(): HasMany
+    {
+        return $this->hasMany(
+            TeachingMaterial::class
+        );
     }
 
     public function teacherAssignments(): HasMany

@@ -107,6 +107,12 @@ class User extends Authenticatable
             ->withTimestamps();
     }
 
+
+    public function student(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(Student::class);
+    }
+
     public function activityLogs(): HasMany
     {
         return $this->hasMany(ActivityLog::class);
