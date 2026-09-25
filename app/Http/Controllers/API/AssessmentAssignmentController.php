@@ -17,10 +17,12 @@ class AssessmentAssignmentController extends BaseController
         Request $request,
         Assessment $assessment
     ): JsonResponse {
-        if ($response = $this->authorizeAssessment(
-            $request,
-            $assessment
-        )) {
+        if (
+            $response = $this->authorizeAssessment(
+                $request,
+                $assessment
+            )
+        ) {
             return $response;
         }
 
@@ -32,13 +34,9 @@ class AssessmentAssignmentController extends BaseController
             );
         }
 
-        $assignedStudentIds =
-            AssessmentAssignment::query()
-                ->where(
-                    'assessment_id',
-                    $assessment->id
-                )
-                ->pluck('student_id');
+        $assignedStudentIds = AssessmentAssignment::query()
+            ->where('assessment_id', $assessment->id)
+            ->pluck('student_id');
 
         $students = Student::query()
             ->where(
@@ -62,8 +60,7 @@ class AssessmentAssignmentController extends BaseController
             ) use ($assignedStudentIds) {
                 return [
                     'id' => $student->id,
-                    'student_id' =>
-                        $student->student_id,
+                    'student_id' => $student->student_id,
                     'name' => trim(
                         $student->first_name
                         . ' '
@@ -74,8 +71,9 @@ class AssessmentAssignmentController extends BaseController
                     'has_account' =>
                         $student->user_id !== null,
                     'is_assigned' =>
-                        $assignedStudentIds
-                            ->contains($student->id),
+                        $assignedStudentIds->contains(
+                            $student->id
+                        ),
                 ];
             })
             ->values();
@@ -84,6 +82,7 @@ class AssessmentAssignmentController extends BaseController
             'assessment' => [
                 'id' => $assessment->id,
                 'title' => $assessment->title,
+                'type' => $assessment->type,
                 'status' => $assessment->status,
                 'school_class_id' =>
                     $assessment->school_class_id,
@@ -98,10 +97,12 @@ class AssessmentAssignmentController extends BaseController
         Request $request,
         Assessment $assessment
     ): JsonResponse {
-        if ($response = $this->authorizeAssessment(
-            $request,
-            $assessment
-        )) {
+        if (
+            $response = $this->authorizeAssessment(
+                $request,
+                $assessment
+            )
+        ) {
             return $response;
         }
 
@@ -213,53 +214,80 @@ class AssessmentAssignmentController extends BaseController
             );
         }
 
+        $newAssignmentCount = 0;
+        $existingAssignmentCount = 0;
+
         DB::transaction(function () use (
             $request,
             $assessment,
             $studentIds,
-            $data
+            $data,
+            &$newAssignmentCount,
+            &$existingAssignmentCount
         ) {
-            AssessmentAssignment::query()
-                ->where(
-                    'assessment_id',
-                    $assessment->id
-                )
-                ->where('status', 'assigned')
-                ->whereNotIn(
-                    'student_id',
-                    $studentIds
-                )
-                ->delete();
-
             foreach ($studentIds as $studentId) {
-                AssessmentAssignment::updateOrCreate(
-                    [
-                        'assessment_id' =>
-                            $assessment->id,
-                        'student_id' => $studentId,
-                    ],
-                    [
-                        'assigned_by' =>
-                            $request->user()->id,
-                        'status' => 'assigned',
-                        'assigned_at' => now(),
-                        'due_at' =>
-                            $data['due_at'] ?? null,
-                    ]
-                );
+                $existingAssignment =
+                    AssessmentAssignment::query()
+                        ->where(
+                            'assessment_id',
+                            $assessment->id
+                        )
+                        ->where(
+                            'student_id',
+                            $studentId
+                        )
+                        ->first();
+
+                if ($existingAssignment) {
+                    $existingAssignmentCount++;
+
+                    /*
+                     * Do not reset submitted work, attempts,
+                     * answers, scores or submission dates.
+                     */
+                    if (
+                        $existingAssignment->status
+                        === 'assigned'
+                    ) {
+                        $existingAssignment->update([
+                            'assigned_by' =>
+                                $request->user()->id,
+                            'due_at' =>
+                                $data['due_at'] ?? null,
+                        ]);
+                    }
+
+                    continue;
+                }
+
+                AssessmentAssignment::create([
+                    'assessment_id' =>
+                        $assessment->id,
+                    'student_id' => $studentId,
+                    'assigned_by' =>
+                        $request->user()->id,
+                    'status' => 'assigned',
+                    'assigned_at' => now(),
+                    'due_at' =>
+                        $data['due_at'] ?? null,
+                ]);
+
+                $newAssignmentCount++;
             }
 
-            DB::table('assessments')
-                ->where('id', $assessment->id)
-                ->update([
-                    'status' => 'published',
-                    'updated_at' => now(),
-                ]);
+            /*
+             * Keep the assessment published so students who
+             * already received it continue seeing it.
+             */
+            $assessment->update([
+                'status' => 'published',
+            ]);
         });
 
-        $assignedStudents = Student::query()
+        $selectedStudents = Student::query()
             ->whereIn('id', $studentIds)
             ->orderBy('first_name')
+            ->orderBy('last_name')
             ->get([
                 'id',
                 'student_id',
@@ -268,8 +296,7 @@ class AssessmentAssignmentController extends BaseController
             ])
             ->map(fn (Student $student) => [
                 'id' => $student->id,
-                'student_id' =>
-                    $student->student_id,
+                'student_id' => $student->student_id,
                 'name' => trim(
                     $student->first_name
                     . ' '
@@ -278,16 +305,33 @@ class AssessmentAssignmentController extends BaseController
             ])
             ->values();
 
+        $totalAssignedCount =
+            AssessmentAssignment::query()
+                ->where(
+                    'assessment_id',
+                    $assessment->id
+                )
+                ->count();
+
         return $this->sendResponse([
             'assessment_id' => $assessment->id,
             'status' => 'published',
             'assignment_scope' =>
                 $data['assignment_scope'],
-            'assigned_count' =>
-                $assignedStudents->count(),
-            'students' => $assignedStudents,
+            'selected_count' =>
+                $selectedStudents->count(),
+            'new_assignment_count' =>
+                $newAssignmentCount,
+            'already_assigned_count' =>
+                $existingAssignmentCount,
+            'total_assigned_count' =>
+                $totalAssignedCount,
+            'students' => $selectedStudents,
             'due_at' => $data['due_at'] ?? null,
-        ], 'Assessment assigned successfully.');
+        ], $newAssignmentCount > 0
+            ? 'Assessment shared successfully.'
+            : 'This assessment was already shared with the selected students.'
+        );
     }
 
     public function myWork(
@@ -319,17 +363,16 @@ class AssessmentAssignmentController extends BaseController
                 'assessment.course:id,name,code',
                 'assessment.teacher:id,name',
             ])
-            ->where(
-                'student_id',
-                $student->id
-            )
+            ->where('student_id', $student->id)
             ->whereHas(
                 'assessment',
-                fn ($query) =>
-                    $query->where(
-                        'status',
-                        'published'
-                    )
+                fn ($query) => $query->whereIn(
+                    'status',
+                    [
+                        'published',
+                        'closed',
+                    ]
+                )
             )
             ->latest('assigned_at')
             ->get()
@@ -359,6 +402,8 @@ class AssessmentAssignmentController extends BaseController
                         $assessment->course,
                     'teacher' =>
                         $assessment->teacher,
+                    'assessment_status' =>
+                        $assessment->status,
                     'status' =>
                         $assignment->status,
                     'assigned_at' =>
@@ -367,7 +412,8 @@ class AssessmentAssignmentController extends BaseController
                         $assignment->due_at,
                     'submitted_at' =>
                         $assignment->submitted_at,
-                    'score' => $assignment->score,
+                    'score' =>
+                        $assignment->score,
                 ];
             })
             ->values();
@@ -403,16 +449,18 @@ class AssessmentAssignmentController extends BaseController
             );
         }
 
-        if (! in_array(
-            $user->role,
-            [
-                'admin',
-                'headmaster',
-                'director_of_studies',
-                'teacher',
-            ],
-            true
-        )) {
+        if (
+            ! in_array(
+                $user->role,
+                [
+                    'admin',
+                    'headmaster',
+                    'director_of_studies',
+                    'teacher',
+                ],
+                true
+            )
+        ) {
             return $this->sendError(
                 'You are not allowed to assign assessments.',
                 [],
