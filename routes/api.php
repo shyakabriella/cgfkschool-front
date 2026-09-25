@@ -23,6 +23,7 @@ use App\Http\Controllers\API\PasswordController;
 use App\Http\Controllers\API\RegisterController;
 use App\Http\Controllers\API\RoleController;
 use App\Http\Controllers\API\SchoolClassController;
+use App\Http\Controllers\API\MarksheetController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\StudentController;
 use App\Http\Controllers\API\StudentAssessmentController;
@@ -161,6 +162,15 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         [
             StudentAssessmentController::class,
             'result',
+        ]
+    );
+
+
+    Route::get(
+        '/teacher/marksheets',
+        [
+            MarksheetController::class,
+            'index',
         ]
     );
 
